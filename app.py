@@ -287,14 +287,11 @@ class AdvancedAPIKeyManager:
         """Get detailed status of all API keys"""
         status_list = []
         current_time = time.time()
-        
         for key_config in self.api_keys:
             api_key = key_config['api_key']
             self._clean_old_usage_data(api_key)
-            
             stats = self.usage_stats[api_key]
             is_available = self._is_key_available(key_config)
-            
             status = {
                 'name': key_config['name'],
                 'enabled': key_config['enabled'],
@@ -313,16 +310,15 @@ class AdvancedAPIKeyManager:
                 'failures': self.failure_counts[api_key],
                 'last_used': datetime.fromtimestamp(self.last_used[api_key]).isoformat() if self.last_used[api_key] else "Never"
             }
-            
             # Add cooldown info if applicable
             if api_key in self.disabled_keys:
-                remaining_time = int(self.disabled_keys[api_key] - current_time)
-                if remaining_time > 0:
-                    status['cooldown_remaining_seconds'] = remaining_time
-                    status['cooldown_remaining_readable'] = f"{remaining_time // 3600}h {(remaining_time % 3600) // 60}m"
-            
+                disabled_until = self.disabled_keys[api_key]
+                if disabled_until is not None:
+                    remaining_time = int(disabled_until - current_time)
+                    if remaining_time > 0:
+                        status['cooldown_remaining_seconds'] = remaining_time
+                        status['cooldown_remaining_readable'] = f"{remaining_time // 3600}h {(remaining_time % 3600) // 60}m"
             status_list.append(status)
-        
         return status_list
 
 # Initialize the advanced API key manager
