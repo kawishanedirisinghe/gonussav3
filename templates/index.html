@@ -427,6 +427,17 @@
             loadChatSession(currentChatId);
         }
 
+        // Add highlight.js for code highlighting
+        const highlightScript = document.createElement('script');
+        highlightScript.src = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/highlight.min.js';
+        document.head.appendChild(highlightScript);
+        const highlightStyle = document.createElement('link');
+        highlightStyle.rel = 'stylesheet';
+        highlightStyle.href = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/styles/github-dark.min.css';
+        document.head.appendChild(highlightStyle);
+
+        let pollingInterval = null;
+
         async function loadChatSession(chatId) {
             try {
                 const res = await fetch(`/api/chat/${chatId}`);
@@ -446,9 +457,79 @@
                 // Show process status
                 chatProcessStatus = chat.process_status || 'idle';
                 showProcessStatus(chatProcessStatus);
+                // If process is running, start polling for status/output
+                if (chatProcessStatus === 'running' || chatProcessStatus === 'waiting_human') {
+                    showStopButton(true);
+                    if (!pollingInterval) {
+                        pollingInterval = setInterval(() => pollChatStatus(chatId), 2000);
+                    }
+                } else {
+                    showStopButton(false);
+                    if (pollingInterval) {
+                        clearInterval(pollingInterval);
+                        pollingInterval = null;
+                    }
+                }
+                setTimeout(() => {
+                    document.querySelectorAll('pre code').forEach(block => {
+                        if (window.hljs) window.hljs.highlightElement(block);
+                    });
+                    makeCodeBlocksCollapsible();
+                }, 100);
             } catch (e) {
                 messagesArea.innerHTML = '<div class="text-center text-gray">Chat not found or error loading chat.</div>';
             }
+        }
+
+        function showStopButton(show) {
+            if (show) {
+                stopButton.classList.remove('hidden');
+            } else {
+                stopButton.classList.add('hidden');
+            }
+        }
+
+        async function pollChatStatus(chatId) {
+            const res = await fetch(`/api/chat/${chatId}/status`);
+            if (!res.ok) return;
+            const data = await res.json();
+            showProcessStatus(data.process_status);
+            // If process stopped/completed, stop polling
+            if (data.process_status !== 'running' && data.process_status !== 'waiting_human') {
+                if (pollingInterval) {
+                    clearInterval(pollingInterval);
+                    pollingInterval = null;
+                }
+                showStopButton(false);
+            }
+            // Update latest output if changed
+            const lastAgentMsg = Array.from(messagesArea.querySelectorAll('.agent-message .message-content')).pop();
+            if (lastAgentMsg && data.latest_output && lastAgentMsg.innerText.trim() !== data.latest_output.trim()) {
+                lastAgentMsg.innerHTML = formatMessage(data.latest_output);
+                setTimeout(() => {
+                    document.querySelectorAll('pre code').forEach(block => {
+                        if (window.hljs) window.hljs.highlightElement(block);
+                    });
+                    makeCodeBlocksCollapsible();
+                }, 100);
+            }
+        }
+
+        function makeCodeBlocksCollapsible() {
+            document.querySelectorAll('pre').forEach(pre => {
+                if (!pre.classList.contains('collapsible')) {
+                    pre.classList.add('collapsible');
+                    const btn = document.createElement('button');
+                    btn.textContent = 'Show/Hide Code';
+                    btn.className = 'btn btn-secondary';
+                    btn.style.marginBottom = '5px';
+                    btn.onclick = () => {
+                        pre.querySelector('code').classList.toggle('hidden');
+                    };
+                    pre.insertBefore(btn, pre.firstChild);
+                }
+                pre.querySelector('code').classList.remove('hidden');
+            });
         }
 
         function showProcessStatus(status) {
@@ -824,27 +905,38 @@
 
         function formatMessage(text) {
             // Basic formatting for better display
-            return text
+            let html = text
                 .replace(/\n/g, '<br>')
                 .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
                 .replace(/\*(.*?)\*/g, '<em>$1</em>')
                 .replace(/`(.*?)`/g, '<code style="background: rgba(0,0,0,0.1); padding: 2px 4px; border-radius: 3px;">$1</code>')
-              .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-                // Italic text (*text*)
+                .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
                 .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-                // Code blocks (```code```)
-                .replace(/```([^`]+)```/g, '<pre><code>$1</code></pre>')
-                // Inline code (`code`)
-                .replace(/`([^`]+)`/g, '<code>$1</code>')
-                // Links ([text](url))
+                .replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>')
                 .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>')
-                // Headers (### Header)
                 .replace(/^###\s(.+)$/gm, '<h3>$1</h3>')
-                // Lists (- item)
                 .replace(/^-\s(.+)$/gm, '<li>$1</li>')
-                .replace(/\n/g, '<br>')
-                // Replace multiple <br> with single one
                 .replace(/(<br>){2,}/g, '<br><br>');
+            // Highlight error lines
+            html = html.replace(/<br>(.*error.*)<br>/gi, '<br><span style="color:red;font-weight:bold;">$1</span><br>');
+            // Add copy button to code blocks
+            setTimeout(() => {
+                document.querySelectorAll('pre').forEach(pre => {
+                    if (!pre.querySelector('.copy-btn')) {
+                        const copyBtn = document.createElement('button');
+                        copyBtn.textContent = 'Copy';
+                        copyBtn.className = 'btn btn-secondary copy-btn';
+                        copyBtn.style.float = 'right';
+                        copyBtn.onclick = () => {
+                            const code = pre.querySelector('code').innerText;
+                            navigator.clipboard.writeText(code);
+                            showNotification('Copied!','success');
+                        };
+                        pre.insertBefore(copyBtn, pre.firstChild);
+                    }
+                });
+            }, 100);
+            return html;
         }
 
         

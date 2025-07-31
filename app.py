@@ -21,6 +21,18 @@ from werkzeug.utils import secure_filename
 import shutil
 from flask import url_for
 
+API_KEY_STATUS_FILE = 'api_key_status.json'
+
+def load_api_key_status():
+    if os.path.exists(API_KEY_STATUS_FILE):
+        with open(API_KEY_STATUS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
+
+def save_api_key_status(status):
+    with open(API_KEY_STATUS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(status, f, ensure_ascii=False, indent=2)
+
 app = Flask(__name__)
 app.config['WORKSPACE'] = 'workspace'
 app.config['UPLOAD_FOLDER'] = 'uploads'
@@ -45,8 +57,9 @@ class AdvancedAPIKeyManager:
         self.disabled_keys = {}  # {key: disabled_until_timestamp}
         self.failure_counts = {}  # {key: consecutive_failures}
         self.last_used = {}  # {key: last_used_timestamp}
-        
-        # Initialize API keys from config
+        self.last_rate_limit = {}  # {key: last_rate_limit_timestamp}
+        # Load persistent status
+        persisted = load_api_key_status()
         for key_config in api_keys_config:
             self.api_keys.append({
                 'api_key': key_config['api_key'],
@@ -57,20 +70,31 @@ class AdvancedAPIKeyManager:
                 'priority': key_config.get('priority', 1),
                 'enabled': key_config.get('enabled', True)
             })
-            
-            # Initialize stats for each key
             key = key_config['api_key']
-            self.usage_stats[key] = {
+            self.usage_stats[key] = persisted.get(key, {}).get('usage_stats', {
                 'requests_this_minute': [],
                 'requests_this_hour': [],
                 'requests_this_day': [],
                 'total_requests': 0
+            })
+            self.failure_counts[key] = persisted.get(key, {}).get('failure_counts', 0)
+            self.last_used[key] = persisted.get(key, {}).get('last_used', None)
+            self.disabled_keys[key] = persisted.get(key, {}).get('disabled_until', None)
+            self.last_rate_limit[key] = persisted.get(key, {}).get('last_rate_limit', None)
+        logger.info(f"Initialized advanced API key manager with {len(self.api_keys)} keys (persistent)")
+
+    def persist_status(self):
+        status = {}
+        for key in self.usage_stats:
+            status[key] = {
+                'usage_stats': self.usage_stats[key],
+                'failure_counts': self.failure_counts[key],
+                'last_used': self.last_used[key],
+                'disabled_until': self.disabled_keys.get(key),
+                'last_rate_limit': self.last_rate_limit.get(key)
             }
-            self.failure_counts[key] = 0
-            self.last_used[key] = None
-        
-        logger.info(f"Initialized advanced API key manager with {len(self.api_keys)} keys")
-    
+        save_api_key_status(status)
+
     def _clean_old_usage_data(self, api_key: str):
         """Clean old usage data for accurate rate limiting"""
         current_time = time.time()
@@ -140,6 +164,7 @@ class AdvancedAPIKeyManager:
         """Disable API key for 24 hours due to rate limit"""
         disable_until = time.time() + 24 * 60 * 60  # 24 hours
         self.disabled_keys[api_key] = disable_until
+        self.persist_status()
         
         logger.warning(f"API key {key_name} disabled for 24 hours due to rate limit")
     
@@ -180,37 +205,33 @@ class AdvancedAPIKeyManager:
     def get_available_api_key(self, use_random: bool = True) -> Optional[Tuple[str, dict]]:
         """Get an available API key with advanced selection logic"""
         available_keys = []
-        
-        # Find all available keys
+        now = time.time()
         for key_config in self.api_keys:
-            if self._is_key_available(key_config):
-                available_keys.append(key_config)
-        
+            api_key = key_config['api_key']
+            if not key_config['enabled']:
+                continue
+            if api_key in self.disabled_keys and self.disabled_keys[api_key] and now < self.disabled_keys[api_key]:
+                continue
+            # Don't retry the same key twice in a row within a minute
+            if self.last_rate_limit.get(api_key) and now - self.last_rate_limit[api_key] < 60:
+                continue
+            available_keys.append(key_config)
         if not available_keys:
             logger.warning("No API keys available")
             return None
-        
         if use_random and len(available_keys) > 1:
-            # Advanced weighted random selection
-            weights = []
-            for key_config in available_keys:
-                score = self._calculate_key_score(key_config)
-                weights.append(score)
-            
-            # Weighted random choice
+            weights = [self._calculate_key_score(k) for k in available_keys]
             selected_key = random.choices(available_keys, weights=weights)[0]
             logger.info(f"Randomly selected API key: {selected_key['name']} (weighted selection)")
         else:
-            # Priority-based selection with health metrics
             available_keys.sort(key=lambda k: (
                 k['priority'],
                 -self._calculate_key_score(k),
                 self.failure_counts[k['api_key']],
-                k['api_key']  # Deterministic tie-breaker
+                k['api_key']
             ))
             selected_key = available_keys[0]
             logger.info(f"Priority selected API key: {selected_key['name']}")
-        
         return selected_key['api_key'], selected_key
     
     def record_successful_request(self, api_key: str):
@@ -226,16 +247,23 @@ class AdvancedAPIKeyManager:
         
         # Update last used time
         self.last_used[api_key] = current_time
+        self.persist_status()
         
         # Reset failure count on success
         self.failure_counts[api_key] = 0
+        self.persist_status()
         
         logger.info(f"Recorded successful request for API key")
     
     def record_rate_limit_error(self, api_key: str, key_name: str):
-        """Record a rate limit error and disable the key"""
-        self._disable_key_for_rate_limit(api_key, key_name)
+        now = time.time()
+        last = self.last_rate_limit.get(api_key)
+        if last and now - last < 60:
+            # Disable for 24h if rate-limited twice in a minute
+            self._disable_key_for_rate_limit(api_key, key_name)
+        self.last_rate_limit[api_key] = now
         self.failure_counts[api_key] += 1
+        self.persist_status()
         logger.warning(f"Rate limit error recorded for {key_name}")
     
     def record_failure(self, api_key: str, key_name: str, error_type: str = "unknown"):
@@ -251,6 +279,7 @@ class AdvancedAPIKeyManager:
             
             disable_until = time.time() + (backoff_minutes * 60)
             self.disabled_keys[api_key] = disable_until
+            self.persist_status()
             logger.warning(f"Temporarily disabled {key_name} for {backoff_minutes} minutes due to failures")
     
     def get_keys_status(self) -> List[Dict]:
@@ -523,7 +552,10 @@ def get_chat_status(chat_id):
     chat = sessions.get(chat_id)
     if not chat:
         return jsonify({'error': 'Chat not found'}), 404
-    return jsonify({'process_status': chat.get('process_status', 'idle')})
+    # Return process status and latest AI output
+    agent_msgs = [m for m in chat['messages'] if m['sender'] == 'agent']
+    latest_output = agent_msgs[-1]['text'] if agent_msgs else ''
+    return jsonify({'process_status': chat.get('process_status', 'idle'), 'latest_output': latest_output})
 # --- END: Chat Session Refactor ---
 
 @app.route('/api/stop-task', methods=['POST'])
