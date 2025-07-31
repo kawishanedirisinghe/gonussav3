@@ -128,8 +128,8 @@ class ToolCallAgent(ReActAgent):
             )
             return False
 
-    async def act(self) -> str:
-        """Execute tool calls and handle their results"""
+    async def act(self, chat_id: str = None) -> str:
+        """Execute tool calls and handle their results, passing chat_id."""
         if not self.tool_calls:
             if self.tool_choices == ToolChoice.REQUIRED:
                 raise ValueError(TOOL_CALL_REQUIRED)
@@ -142,7 +142,7 @@ class ToolCallAgent(ReActAgent):
             # Reset base64_image for each tool call
             self._current_base64_image = None
 
-            result = await self.execute_tool(command)
+            result = await self.execute_tool(command, chat_id=chat_id)
 
             if self.max_observe:
                 result = result[: self.max_observe]
@@ -163,8 +163,8 @@ class ToolCallAgent(ReActAgent):
 
         return "\n\n".join(results)
 
-    async def execute_tool(self, command: ToolCall) -> str:
-        """Execute a single tool call with robust error handling"""
+    async def execute_tool(self, command: ToolCall, chat_id: str = None) -> str:
+        """Execute a single tool call with robust error handling, passing chat_id."""
         if not command or not command.function or not command.function.name:
             return "Error: Invalid command format"
 
@@ -175,7 +175,9 @@ class ToolCallAgent(ReActAgent):
         try:
             # Parse arguments
             args = json.loads(command.function.arguments or "{}")
-
+            # Pass chat_id to tool if available
+            if chat_id:
+                args['chat_id'] = chat_id
             # Execute the tool
             logger.info(f"🔧 Activating tool: '{name}'...")
             result = await self.available_tools.execute(name=name, tool_input=args)
@@ -242,9 +244,9 @@ class ToolCallAgent(ReActAgent):
                     )
         logger.info(f"✨ Cleanup complete for agent '{self.name}'.")
 
-    async def run(self, request: Optional[str] = None) -> str:
-        """Run the agent with cleanup when done."""
+    async def run(self, request: Optional[str] = None, chat_id: str = None) -> str:
+        """Run the agent with cleanup when done, passing chat_id."""
         try:
-            return await super().run(request)
+            return await super().run(request, chat_id=chat_id)
         finally:
             await self.cleanup()

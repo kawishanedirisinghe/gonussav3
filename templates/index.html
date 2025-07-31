@@ -130,6 +130,8 @@
         let uploadedFiles = [];
         let currentChatId = null;
         let chatProcessStatus = 'idle';
+        let askHumanActive = false;
+        let askHumanQuestion = '';
         
         // DOM Elements
         const messageInput = document.getElementById('messageInput');
@@ -480,14 +482,129 @@
                 filesHTML += '</div>';
             }
             
-            messageDiv.innerHTML = `
-                <div class="message-content">${text}</div>
-                ${filesHTML}
-                <div class="message-time">${time}</div>
-            `;
+            // Detect ask_human prompt
+            if (sender === 'agent' && text && text.startsWith('[ask_human]')) {
+                askHumanActive = true;
+                askHumanQuestion = text.replace('[ask_human]', '').trim();
+                messageDiv.innerHTML = `
+                    <div class="message-content"><strong>🤖 AI asks:</strong> ${askHumanQuestion}</div>
+                    <div class="message-time">${time}</div>
+                `;
+                // Show ask_human input
+                showAskHumanInput();
+            } else {
+                messageDiv.innerHTML = `
+                    <div class="message-content">${formatMessage(text)}</div>
+                    ${filesHTML}
+                    <div class="message-time">${time}</div>
+                `;
+            }
             
             messagesArea.appendChild(messageDiv);
             messagesArea.scrollTop = messagesArea.scrollHeight;
+        }
+
+        function showAskHumanInput() {
+            // Remove existing input if any
+            let old = document.getElementById('askHumanInputDiv');
+            if (old) old.remove();
+            // Create input
+            const div = document.createElement('div');
+            div.id = 'askHumanInputDiv';
+            div.className = 'input-area';
+            div.innerHTML = `
+                <div class="input-container">
+                    <input id="askHumanInput" class="message-input" placeholder="Answer AI's question..." style="flex:1;" />
+                    <button id="askHumanSendButton" class="action-button send-button"><i class="fas fa-paper-plane"></i></button>
+                </div>
+            `;
+            messagesArea.parentElement.appendChild(div);
+            document.getElementById('askHumanSendButton').onclick = sendAskHumanAnswer;
+            document.getElementById('askHumanInput').focus();
+        }
+
+        async function sendAskHumanAnswer() {
+            const input = document.getElementById('askHumanInput');
+            const answer = input.value.trim();
+            if (!answer || !askHumanActive) return;
+            askHumanActive = false;
+            askHumanQuestion = '';
+            // Remove input
+            let old = document.getElementById('askHumanInputDiv');
+            if (old) old.remove();
+            // Add user message
+            addMessage('user', answer);
+            // Send answer as human_answer to /api/chat-stream
+            isProcessing = true;
+            updateUIForProcessing(true);
+            showTypingIndicator();
+            await fetch(`/api/chat/${currentChatId}/message`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ sender: 'user', text: answer, files: [], agent_type: selectedAgent })
+            });
+            try {
+                const response = await fetch('/api/chat-stream', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        chat_id: currentChatId,
+                        human_answer: answer
+                    })
+                });
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                let agentMessage = '';
+                hideTypingIndicator();
+                const messageDiv = document.createElement('div');
+                messageDiv.className = 'message agent-message';
+                messagesArea.appendChild(messageDiv);
+                const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                messageDiv.innerHTML = `<div class="message-content"></div><div class="message-time">${time}</div>`;
+                let contentDiv = messageDiv.querySelector('.message-content');
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    const chunk = decoder.decode(value, { stream: true });
+                    buffer += chunk;
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+                    for (const line of lines) {
+                        if (line.includes('0303030')) {
+                            showNotification('🖋️AI is Succses Fully!', 'info');
+                            playPatternSound();
+                            await loadChatSession(currentChatId);
+                            continue;
+                        }
+                        if (line.includes('[ask_human]')) {
+                            // Will be handled by addMessage
+                            continue;
+                        }
+                        agentMessage += line + '\n';
+                        if (contentDiv) {
+                            contentDiv.innerHTML = formatMessage(agentMessage);
+                            messagesArea.scrollTop = messagesArea.scrollHeight;
+                        }
+                    }
+                }
+                if (buffer && !buffer.includes('0303030') && contentDiv) {
+                    agentMessage += buffer;
+                    contentDiv.innerHTML = formatMessage(agentMessage);
+                }
+                await loadChatSession(currentChatId);
+            } catch (error) {
+                hideTypingIndicator();
+                addMessage('agent', `❌ Error: ${error.message}`);
+                console.error('Error:', error);
+            } finally {
+                isProcessing = false;
+                currentTaskId = null;
+                updateUIForProcessing(false);
+                loadAPIStatus();
+                loadChatHistory();
+            }
         }
 
         function showTypingIndicator() {
@@ -524,7 +641,7 @@
         // Send Message
         async function sendMessage() {
             const message = messageInput.value.trim();
-            if (!message || isProcessing) return;
+            if (!message || isProcessing || askHumanActive) return;
             // Use chatId as taskId
             if (!currentChatId) {
                 await createNewChat();

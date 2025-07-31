@@ -639,17 +639,17 @@ async def main(prompt, task_id=None):
 
 # Thread wrapper
 def run_async_task(message, task_id=None):
-    """Run async task in new thread"""
+    """Run async task in new thread, passing chat_id."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(main(message, task_id))
+        loop.run_until_complete(main(message, task_id=task_id))
     except Exception as e:
         logger.error(f"Task execution failed: {e}")
     finally:
         loop.close()
 
-# Update: When starting a chat-stream, require chat_id and update session
+# Update chat_stream to handle ask_human answers
 @app.route('/api/chat-stream', methods=['POST'])
 def chat_stream():
     """Enhanced streaming chat interface with stop functionality"""
@@ -664,6 +664,7 @@ def chat_stream():
     if not chat_id:
         chat_id = str(uuid.uuid4())
     uploaded_files = prompt_data.get("uploaded_files", [])
+    human_answer = prompt_data.get("human_answer")
     
     logger.info(f"Received request: {message}")
     
@@ -689,7 +690,7 @@ def chat_stream():
         'start_time': time.time()
     }
 
-    # Save user message to chat session
+    # Save user message or human answer to chat session
     sessions = load_chat_sessions()
     if chat_id not in sessions:
         sessions[chat_id] = {
@@ -701,16 +702,29 @@ def chat_stream():
             'agent_type': 'manus',
             'uploaded_files': uploaded_files
         }
-    sessions[chat_id]['messages'].append({
-        'sender': 'user',
-        'text': message,
-        'files': uploaded_files,
-        'timestamp': datetime.now().isoformat()
-    })
-    sessions[chat_id]['last_update'] = datetime.now().isoformat()
-    sessions[chat_id]['process_status'] = 'running'
-    save_chat_sessions(sessions)
-
+    if human_answer:
+        sessions[chat_id]['messages'].append({
+            'sender': 'user',
+            'text': human_answer,
+            'files': uploaded_files,
+            'timestamp': datetime.now().isoformat()
+        })
+        sessions[chat_id]['last_update'] = datetime.now().isoformat()
+        sessions[chat_id]['process_status'] = 'running'
+        save_chat_sessions(sessions)
+        full_message = human_answer
+    else:
+        sessions[chat_id]['messages'].append({
+            'sender': 'user',
+            'text': message,
+            'files': uploaded_files,
+            'timestamp': datetime.now().isoformat()
+        })
+        sessions[chat_id]['last_update'] = datetime.now().isoformat()
+        sessions[chat_id]['process_status'] = 'running'
+        save_chat_sessions(sessions)
+        full_message = message + ("\n" + str(uploaded_files) if uploaded_files else "")
+    
     # Start async task thread
     task_thread = threading.Thread(
         target=run_async_task,
