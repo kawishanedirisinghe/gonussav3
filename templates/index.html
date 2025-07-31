@@ -128,6 +128,8 @@
         let isProcessing = false;
         let currentTaskId = null;
         let uploadedFiles = [];
+        let currentChatId = null;
+        let chatProcessStatus = 'idle';
         
         // DOM Elements
         const messageInput = document.getElementById('messageInput');
@@ -147,9 +149,16 @@
         // Initialize
         document.addEventListener('DOMContentLoaded', function() {
             loadAPIStatus();
-            loadChatHistory();
             setupEventListeners();
-            
+            // Check for chat_id in URL
+            const urlParams = new URLSearchParams(window.location.search);
+            const chatIdFromUrl = urlParams.get('chat_id');
+            if (chatIdFromUrl) {
+                currentChatId = chatIdFromUrl;
+                loadChatSession(chatIdFromUrl);
+            } else {
+                createNewChat();
+            }
             // Auto-refresh API status
             setInterval(loadAPIStatus, 30000);
         });
@@ -408,6 +417,53 @@
             }
         }
 
+        async function createNewChat() {
+            const res = await fetch('/api/chat/new', {method: 'POST'});
+            const data = await res.json();
+            currentChatId = data.chat_id;
+            window.history.replaceState({}, '', `?chat_id=${currentChatId}`);
+            loadChatSession(currentChatId);
+        }
+
+        async function loadChatSession(chatId) {
+            try {
+                const res = await fetch(`/api/chat/${chatId}`);
+                if (!res.ok) throw new Error('Chat not found');
+                const chat = await res.json();
+                // Clear current messages
+                messagesArea.innerHTML = '';
+                // Show all messages in order
+                (chat.messages || []).forEach(msg => {
+                    addMessage(msg.sender, msg.text, msg.files);
+                });
+                // Set agent type
+                selectAgent(chat.agent_type || 'manus');
+                // Set uploaded files if any
+                uploadedFiles = chat.uploaded_files || [];
+                displayUploadedFiles();
+                // Show process status
+                chatProcessStatus = chat.process_status || 'idle';
+                showProcessStatus(chatProcessStatus);
+            } catch (e) {
+                messagesArea.innerHTML = '<div class="text-center text-gray">Chat not found or error loading chat.</div>';
+            }
+        }
+
+        function showProcessStatus(status) {
+            // Remove old status
+            let old = document.getElementById('processStatusDiv');
+            if (old) old.remove();
+            // Show only if not idle or completed
+            if (status && status !== 'idle' && status !== 'completed') {
+                const div = document.createElement('div');
+                div.id = 'processStatusDiv';
+                div.className = 'text-center mb-2';
+                div.style.color = status === 'running' ? 'orange' : (status === 'stopped' ? 'red' : 'gray');
+                div.innerText = `Process status: ${status}`;
+                messagesArea.parentElement.insertBefore(div, messagesArea);
+            }
+        }
+
         // Message Functions
         function addMessage(sender, text, files = []) {
             const messageDiv = document.createElement('div');
@@ -469,10 +525,12 @@
         async function sendMessage() {
             const message = messageInput.value.trim();
             if (!message || isProcessing) return;
+            // Use chatId as taskId
+            if (!currentChatId) {
+                await createNewChat();
+            }
+            currentTaskId = currentChatId;
 
-            // Generate task ID
-            currentTaskId = 'task_';
-            
             isProcessing = true;
             updateUIForProcessing(true);
             
@@ -486,6 +544,13 @@
             // Show typing indicator
             showTypingIndicator();
 
+            // Save user message to chat session
+            await fetch(`/api/chat/${currentChatId}/message`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ sender: 'user', text: message, files: uploadedFiles, agent_type: selectedAgent })
+            });
+
             try {
                 const endpoint = selectedAgent === 'manus' ? '/api/chat-stream' : '/api/flow-stream';
                 const response = await fetch(endpoint, {
@@ -495,7 +560,7 @@
                     },
                     body: JSON.stringify({ 
                         message, 
-                        task_id: currentTaskId,
+                        chat_id: currentChatId,
                         uploaded_files: uploadedFiles 
                     }),
                 });
@@ -529,9 +594,10 @@
                     
                     for (const line of lines) {
                         if (line.includes('0303030')) {
-                            showNotification("✋AI is Succses Fully!", "info");
-
+                            showNotification("🖋️AI is Succses Fully!", "info");
                             playPatternSound();
+                            // Reload chat session to get latest agent message and status
+                            await loadChatSession(currentChatId);
                             continue;
                         }
 
@@ -614,6 +680,8 @@
                 // Clear uploaded files after successful processing
                 uploadedFiles = [];
                 displayUploadedFiles();
+                // Reload chat session to get latest agent message and status
+                await loadChatSession(currentChatId);
 
             } catch (error) {
                 hideTypingIndicator();
@@ -676,7 +744,7 @@
                     headers: {
                         'Content-Type': 'application/json',
                     },
-                    body: JSON.stringify({ task_id: currentTaskId }),
+                    body: JSON.stringify({ task_id: currentChatId }),
                 });
 
                 if (!response.ok) {
@@ -690,6 +758,8 @@
                     currentTaskId = null;
                     updateUIForProcessing(false);
                     hideTypingIndicator();
+                    // Reload chat session to get latest status
+                    await loadChatSession(currentChatId);
                 } else {
                     showNotification('⚠️ Could not stop task', 'warning');
                 }

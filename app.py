@@ -19,6 +19,7 @@ import json
 import uuid
 from werkzeug.utils import secure_filename
 import shutil
+from flask import url_for
 
 app = Flask(__name__)
 app.config['WORKSPACE'] = 'workspace'
@@ -446,6 +447,85 @@ def get_chat_history():
         logger.error(f"Error getting chat history: {e}")
         return jsonify({'error': str(e)}), 500
 
+# --- BEGIN: Chat Session Refactor ---
+CHAT_SESSIONS_FILE = 'chat_sessions.json'
+
+def load_chat_sessions():
+    try:
+        if os.path.exists(CHAT_SESSIONS_FILE):
+            with open(CHAT_SESSIONS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return {}
+    except Exception as e:
+        logger.error(f"Error loading chat sessions: {e}")
+        return {}
+
+def save_chat_sessions(sessions):
+    try:
+        with open(CHAT_SESSIONS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(sessions, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving chat sessions: {e}")
+
+# New: API to create a new chat session and return chat_id
+@app.route('/api/chat/new', methods=['POST'])
+def create_chat():
+    chat_id = str(uuid.uuid4())
+    sessions = load_chat_sessions()
+    sessions[chat_id] = {
+        'messages': [],
+        'status': 'created',
+        'created_at': datetime.now().isoformat(),
+        'last_update': datetime.now().isoformat(),
+        'process_status': 'idle',
+        'agent_type': 'manus',
+        'uploaded_files': []
+    }
+    save_chat_sessions(sessions)
+    return jsonify({'chat_id': chat_id, 'url': url_for('index', _external=True) + f'?chat_id={chat_id}'})
+
+# New: API to get chat session by ID
+@app.route('/api/chat/<chat_id>', methods=['GET'])
+def get_chat(chat_id):
+    sessions = load_chat_sessions()
+    chat = sessions.get(chat_id)
+    if not chat:
+        return jsonify({'error': 'Chat not found'}), 404
+    return jsonify(chat)
+
+# New: API to append message to chat session
+@app.route('/api/chat/<chat_id>/message', methods=['POST'])
+def append_message(chat_id):
+    data = request.get_json()
+    sender = data.get('sender')
+    text = data.get('text')
+    files = data.get('files', [])
+    agent_type = data.get('agent_type', 'manus')
+    sessions = load_chat_sessions()
+    chat = sessions.get(chat_id)
+    if not chat:
+        return jsonify({'error': 'Chat not found'}), 404
+    chat['messages'].append({
+        'sender': sender,
+        'text': text,
+        'files': files,
+        'timestamp': datetime.now().isoformat()
+    })
+    chat['last_update'] = datetime.now().isoformat()
+    chat['agent_type'] = agent_type
+    save_chat_sessions(sessions)
+    return jsonify({'success': True})
+
+# New: API to get process status for a chat
+@app.route('/api/chat/<chat_id>/status', methods=['GET'])
+def get_chat_status(chat_id):
+    sessions = load_chat_sessions()
+    chat = sessions.get(chat_id)
+    if not chat:
+        return jsonify({'error': 'Chat not found'}), 404
+    return jsonify({'process_status': chat.get('process_status', 'idle')})
+# --- END: Chat Session Refactor ---
+
 @app.route('/api/stop-task', methods=['POST'])
 def stop_task():
     """Stop running AI task"""
@@ -456,6 +536,11 @@ def stop_task():
         if task_id in running_tasks:
             # Signal the task to stop
             running_tasks[task_id]['stop_flag'] = True
+            # Update chat session status
+            sessions = load_chat_sessions()
+            if task_id in sessions:
+                sessions[task_id]['process_status'] = 'stopped'
+                save_chat_sessions(sessions)
             logger.info(f"Stop signal sent for task: {task_id}")
             return jsonify({'success': True, 'message': 'Stop signal sent'})
         else:
@@ -465,6 +550,7 @@ def stop_task():
         logger.error(f"Error stopping task: {e}")
         return jsonify({'error': str(e)}), 500
 
+# Update: Async task should check stop flag and exit
 async def main(prompt, task_id=None):
     """Enhanced main function with advanced API key rotation and stop functionality"""
     max_retries = len(api_key_manager.api_keys)
@@ -507,7 +593,16 @@ async def main(prompt, task_id=None):
             )
             
             # Execute the task
-            await agent.run(prompt)
+            agent_task = agent.run(prompt)
+            while True:
+                if running_tasks.get(task_id, {}).get('stop_flag', False):
+                    logger.info(f"Task {task_id} stopped by user.")
+                    break
+                try:
+                    await asyncio.wait_for(asyncio.shield(agent_task), timeout=1)
+                    break
+                except asyncio.TimeoutError:
+                    continue
             
             # Record successful request
             api_key_manager.record_successful_request(api_key)
@@ -554,6 +649,7 @@ def run_async_task(message, task_id=None):
     finally:
         loop.close()
 
+# Update: When starting a chat-stream, require chat_id and update session
 @app.route('/api/chat-stream', methods=['POST'])
 def chat_stream():
     """Enhanced streaming chat interface with stop functionality"""
@@ -564,7 +660,9 @@ def chat_stream():
     # Get request data
     prompt_data = request.get_json()
     message = prompt_data["message"]
-    task_id = prompt_data.get("task_id", str(uuid.uuid4()))
+    chat_id = prompt_data.get("chat_id")
+    if not chat_id:
+        chat_id = str(uuid.uuid4())
     uploaded_files = prompt_data.get("uploaded_files", [])
     
     logger.info(f"Received request: {message}")
@@ -586,15 +684,37 @@ def chat_stream():
     full_message = message + file_context
     
     # Initialize task tracking
-    running_tasks[task_id] = {
+    running_tasks[chat_id] = {
         'stop_flag': False,
         'start_time': time.time()
     }
 
+    # Save user message to chat session
+    sessions = load_chat_sessions()
+    if chat_id not in sessions:
+        sessions[chat_id] = {
+            'messages': [],
+            'status': 'created',
+            'created_at': datetime.now().isoformat(),
+            'last_update': datetime.now().isoformat(),
+            'process_status': 'idle',
+            'agent_type': 'manus',
+            'uploaded_files': uploaded_files
+        }
+    sessions[chat_id]['messages'].append({
+        'sender': 'user',
+        'text': message,
+        'files': uploaded_files,
+        'timestamp': datetime.now().isoformat()
+    })
+    sessions[chat_id]['last_update'] = datetime.now().isoformat()
+    sessions[chat_id]['process_status'] = 'running'
+    save_chat_sessions(sessions)
+
     # Start async task thread
     task_thread = threading.Thread(
         target=run_async_task,
-        args=(full_message, task_id)
+        args=(full_message, chat_id)
     )
     task_thread.start()
 
@@ -605,7 +725,7 @@ def chat_stream():
 
         while task_thread.is_alive() or not log_queue.empty():
             # Check for stop signal
-            if running_tasks.get(task_id, {}).get('stop_flag', False):
+            if running_tasks.get(chat_id, {}).get('stop_flag', False):
                 yield "Task stopped by user.\n"
                 break
                 
@@ -630,7 +750,7 @@ def chat_stream():
 
         # Save chat history
         chat_data = {
-            'id': task_id,
+            'id': chat_id,
             'timestamp': datetime.now().isoformat(),
             'user_message': message,
             'agent_response': full_response,
@@ -639,9 +759,22 @@ def chat_stream():
         }
         save_chat_history(chat_data)
         
+        # Save agent response to chat session
+        sessions = load_chat_sessions()
+        if chat_id in sessions:
+            sessions[chat_id]['messages'].append({
+                'sender': 'agent',
+                'text': full_response,
+                'files': uploaded_files,
+                'timestamp': datetime.now().isoformat()
+            })
+            sessions[chat_id]['last_update'] = datetime.now().isoformat()
+            sessions[chat_id]['process_status'] = 'completed'
+            save_chat_sessions(sessions)
+
         # Clean up task tracking
-        if task_id in running_tasks:
-            del running_tasks[task_id]
+        if chat_id in running_tasks:
+            del running_tasks[chat_id]
 
         # Final confirmation
         yield """0303030"""
