@@ -113,18 +113,8 @@ class BaseAgent(BaseModel, ABC):
         kwargs = {"base64_image": base64_image, **(kwargs if role == "tool" else {})}
         self.memory.add_message(message_map[role](content, **kwargs))
 
-    async def run(self, request: Optional[str] = None) -> str:
-        """Execute the agent's main loop asynchronously.
-
-        Args:
-            request: Optional initial user request to process.
-
-        Returns:
-            A string summarizing the execution results.
-
-        Raises:
-            RuntimeError: If the agent is not in IDLE state at start.
-        """
+    async def run(self, request: Optional[str] = None, chat_id: str = None) -> str:
+        """Execute the agent's main loop asynchronously, propagating chat_id."""
         if self.state != AgentState.IDLE:
             raise RuntimeError(f"Cannot run agent from state: {self.state}")
 
@@ -138,7 +128,11 @@ class BaseAgent(BaseModel, ABC):
             ):
                 self.current_step += 1
                 logger.info(f"Executing step {self.current_step}/{self.max_steps}")
-                step_result = await self.step()
+                # Pass chat_id to step/act if supported
+                if hasattr(self, 'act'):
+                    step_result = await self.act(chat_id=chat_id)
+                else:
+                    step_result = await self.step()
 
                 # Check for stuck state
                 if self.is_stuck():
