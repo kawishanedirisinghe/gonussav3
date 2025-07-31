@@ -129,10 +129,11 @@ class AdvancedAPIKeyManager:
         
         # Check if key is in cooldown period (24 hours after rate limit)
         if api_key in self.disabled_keys:
-            if current_time < self.disabled_keys[api_key]:
+            disabled_until = self.disabled_keys[api_key]
+            if disabled_until is not None and current_time < disabled_until:
                 logger.debug(f"Key {key_config['name']} still in cooldown")
                 return False
-            else:
+            elif disabled_until is not None:
                 # Cooldown expired, remove from disabled list
                 del self.disabled_keys[api_key]
                 self.failure_counts[api_key] = 0  # Reset failure count
