@@ -113,11 +113,12 @@ class BaseAgent(BaseModel, ABC):
         kwargs = {"base64_image": base64_image, **(kwargs if role == "tool" else {})}
         self.memory.add_message(message_map[role](content, **kwargs))
 
-    async def run(self, request: Optional[str] = None) -> str:
+    async def run(self, request: Optional[str] = None, task_id: Optional[str] = None) -> str:
         """Execute the agent's main loop asynchronously.
 
         Args:
             request: Optional initial user request to process.
+            task_id: Optional task ID for stop signal checking.
 
         Returns:
             A string summarizing the execution results.
@@ -136,6 +137,12 @@ class BaseAgent(BaseModel, ABC):
             while (
                 self.current_step < self.max_steps and self.state != AgentState.FINISHED
             ):
+                # Check for stop signal
+                if task_id and self._check_stop_signal(task_id):
+                    logger.info(f"Agent execution stopped by user signal for task {task_id}")
+                    results.append("Execution stopped by user")
+                    break
+                    
                 self.current_step += 1
                 logger.info(f"Executing step {self.current_step}/{self.max_steps}")
                 step_result = await self.step()
@@ -152,6 +159,15 @@ class BaseAgent(BaseModel, ABC):
                 results.append(f"Terminated: Reached max steps ({self.max_steps})")
         await SANDBOX_CLIENT.cleanup()
         return "\n".join(results) if results else "No steps executed"
+    
+    def _check_stop_signal(self, task_id: str) -> bool:
+        """Check if there's a stop signal for the given task ID."""
+        try:
+            from app.state import is_task_stopped
+            return is_task_stopped(task_id)
+        except Exception as e:
+            logger.warning(f"Could not check stop signal: {e}")
+            return False
 
     @abstractmethod
     async def step(self) -> str:
