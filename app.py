@@ -876,3 +876,73 @@ if __name__ == '__main__':
                     f"Usage={status['usage']['requests_this_day']}/{status['limits']['max_per_day']} today")
     
     app.run(host='0.0.0.0', port=3000,  debug=False)
+
+
+# Shareable link routes
+@app.route('/chat/<session_id>')
+def shared_chat(session_id):
+    """Shareable chat interface"""
+    try:
+        from database import db
+        if not db.session_exists(session_id):
+            return render_template('error.html', 
+                                 error_title="Chat Not Found",
+                                 error_message="This chat session does not exist or has been deleted."), 404
+        
+        # Get messages for this session
+        messages = []  # db.get_session_messages(session_id) when implemented
+        
+        return render_template('shared_chat.html', 
+                             session_id=session_id,
+                             messages=messages)
+    except Exception as e:
+        return render_template('error.html',
+                             error_title="Error Loading Chat",
+                             error_message=str(e)), 500
+
+@app.route('/api/create-shareable-link', methods=['POST'])
+def create_shareable_link():
+    """Create a new shareable chat session"""
+    try:
+        from database import db
+        data = request.get_json()
+        title = data.get('title', f"Chat {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        
+        session_info = db.create_session(title)
+        
+        return jsonify({
+            'success': True,
+            'session_id': session_info['session_id'],
+            'shareable_url': session_info['shareable_url'],
+            'full_url': request.host_url.rstrip('/') + session_info['shareable_url']
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/human-response', methods=['POST'])
+def submit_human_response():
+    """Submit response to human question from ask_human tool"""
+    try:
+        from app.state import submit_human_response
+        data = request.get_json()
+        question_id = data.get('question_id')
+        response = data.get('response')
+        
+        if not question_id or not response:
+            return jsonify({'success': False, 'error': 'Missing question_id or response'}), 400
+        
+        success = submit_human_response(question_id, response)
+        return jsonify({'success': success})
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/pending-questions')
+def get_pending_questions():
+    """Get pending human questions"""
+    try:
+        from app.state import get_pending_questions
+        questions = get_pending_questions()
+        return jsonify({'questions': questions})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
